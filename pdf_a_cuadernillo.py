@@ -220,11 +220,11 @@ def main() -> None:
         help="Margen interno en puntos PDF. Default: 12",
     )
     parser.add_argument(
-        "--pages-per-side",
+        "--p",
         type=int,
         choices=[2, 4],
-        default=2,
-        help="Cantidad de páginas por cara: 2 o 4. Default: 2",
+        default=4,
+        help="Cantidad de páginas por cara: 2 o 4. Default: 4",
     )
 
     args = parser.parse_args()
@@ -239,7 +239,7 @@ def main() -> None:
     if args.output:
         output_path = Path(args.output)
     else:
-        suffix = f"_cuadernillo_{args.pages_per_side}up.pdf"
+        suffix = f"_cuadernillo_{args.p}up.pdf"
         output_path = output_dir / f"{input_path.stem}{suffix}"
 
     if output_path.parent != Path("."):
@@ -249,14 +249,14 @@ def main() -> None:
     writer = build_booklet(
         reader,
         margin=args.margin,
-        pages_per_side=args.pages_per_side,
+        pages_per_side=args.p,
     )
 
     with output_path.open("wb") as f:
         writer.write(f)
 
     total_original = len(reader.pages)
-    multiple = 4 if args.pages_per_side == 2 else 8
+    multiple = 4 if args.p == 2 else 8
     total_padded = math.ceil(total_original / multiple) * multiple
     blanks_added = total_padded - total_original
 
@@ -264,7 +264,7 @@ def main() -> None:
     print(f"Páginas originales: {total_original}")
     print(f"Páginas finales ajustadas: {total_padded}")
     print(f"Páginas en blanco agregadas: {blanks_added}")
-    print(f"Páginas por cara: {args.pages_per_side}")
+    print(f"Páginas por cara: {args.p}")
     print(f"Salida: {output_path}")
     print()
     print("Imprimir así:")
