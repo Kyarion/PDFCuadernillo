@@ -1,2 +1,5 @@
-/venv
-/pdf
+venv
+pdf/input/*
+pdf/output/*
+!pdf/input/a
+!pdf/output/a
