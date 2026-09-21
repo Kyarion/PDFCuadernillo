@@ -7,27 +7,65 @@ from pathlib import Path
 from pypdf import PdfReader, PdfWriter, PageObject, Transformation
 
 
-# Tamaño carta en puntos PDF
-LETTER_W = 612   # 8.5 in * 72
-LETTER_H = 792   # 11 in * 72
+# ============================================================
+# TAMAÑOS
+# ============================================================
 
-# Salida en horizontal
+# Tamaño Carta / Letter en puntos PDF
+# 1 pulgada = 72 puntos
+LETTER_W = 612  # 8.5"
+LETTER_H = 792  # 11"
+
+# ------------------------------------------------------------
+# Área LÓGICA donde armamos el cuadernillo.
+#
+# El cuadernillo se compone primero como una hoja horizontal:
+#
+#        792 x 612
+#
+# Después se gira todo el contenido y se coloca físicamente
+# dentro de una página Carta VERTICAL de:
+#
+#        612 x 792
+#
+# De esta forma CUPS/HPLIP detectará el PDF como Portrait.
+# ------------------------------------------------------------
+
 SHEET_W = LETTER_H  # 792
 SHEET_H = LETTER_W  # 612
 
+# Tamaño REAL de las páginas del PDF de salida
+OUTPUT_W = LETTER_W  # 612
+OUTPUT_H = LETTER_H  # 792
 
-def add_blank_pages(pages: list[PageObject], multiple: int) -> list[PageObject]:
+
+# ============================================================
+# UTILIDADES
+# ============================================================
+
+def add_blank_pages(
+    pages: list[PageObject],
+    multiple: int,
+) -> list[PageObject]:
     """
-    Completa hasta múltiplo de `multiple`.
-    Para cuadernillo 2-up: múltiplo de 4
-    Para cuadernillo 4-up: múltiplo de 8
+    Completa el documento hasta un múltiplo determinado.
+
+    Para cuadernillo 2-up:
+        múltiplo de 4
+
+    Para cuadernillo 4-up:
+        múltiplo de 8
     """
     total = len(pages)
     faltan = (multiple - (total % multiple)) % multiple
+
     resultado = list(pages)
 
     for _ in range(faltan):
-        blank = PageObject.create_blank_page(width=LETTER_W, height=LETTER_H)
+        blank = PageObject.create_blank_page(
+            width=LETTER_W,
+            height=LETTER_H,
+        )
         resultado.append(blank)
 
     return resultado
@@ -42,15 +80,20 @@ def fit_page_to_slot(
     margin: float = 12,
 ) -> tuple[PageObject, Transformation]:
     """
-    Calcula la transformación para escalar y centrar una página dentro de un espacio.
+    Calcula una transformación para escalar y centrar una
+    página PDF dentro de un espacio determinado.
     """
+
     src_w = float(src_page.mediabox.width)
     src_h = float(src_page.mediabox.height)
 
     usable_w = slot_w - 2 * margin
     usable_h = slot_h - 2 * margin
 
-    scale = min(usable_w / src_w, usable_h / src_h)
+    scale = min(
+        usable_w / src_w,
+        usable_h / src_h,
+    )
 
     placed_w = src_w * scale
     placed_h = src_h * scale
@@ -58,7 +101,12 @@ def fit_page_to_slot(
     x = slot_x + (slot_w - placed_w) / 2
     y = slot_y + (slot_h - placed_h) / 2
 
-    transform = Transformation().scale(scale).translate(tx=x, ty=y)
+    transform = (
+        Transformation()
+        .scale(scale)
+        .translate(tx=x, ty=y)
+    )
+
     return src_page, transform
 
 
@@ -72,8 +120,10 @@ def merge_page_in_slot(
     margin: float = 12,
 ) -> None:
     """
-    Inserta una página dentro de uno de los espacios de la hoja.
+    Inserta una página PDF dentro de uno de los espacios de
+    la hoja lógica horizontal.
     """
+
     _, transform = fit_page_to_slot(
         src_page=src_page,
         slot_x=slot_x,
@@ -82,196 +132,743 @@ def merge_page_in_slot(
         slot_h=slot_h,
         margin=margin,
     )
-    dest_page.merge_transformed_page(src_page, transform)
+
+    dest_page.merge_transformed_page(
+        src_page,
+        transform,
+    )
 
 
-def booklet_sheet_indices(total_pages: int, sheet_index: int) -> dict[str, int]:
+# ============================================================
+# CONVERSIÓN HORIZONTAL -> VERTICAL LADEADO
+# ============================================================
+
+def make_portrait_sideways(
+    landscape_page: PageObject,
+    direction: str = "right",
+) -> PageObject:
     """
-    Devuelve los índices de una hoja de cuadernillo clásica (2 páginas por cara).
+    Toma una página lógica horizontal de 792 x 612 y coloca
+    físicamente su contenido girado 90 grados dentro de una
+    página Carta VERTICAL de 612 x 792.
+
+    MUY IMPORTANTE:
+
+    No utiliza solamente la metadata /Rotate del PDF.
+
+    El contenido realmente se transforma dentro de una
+    MediaBox vertical.
+
+    De esta manera CUPS/HPLIP verá:
+
+        MediaBox = 612 x 792
+        orientación = Portrait
+
+    aunque visualmente el contenido esté ladeado.
+
+    direction:
+
+        "right"
+            gira el contenido 90 grados hacia la derecha
+            (sentido horario).
+
+        "left"
+            gira el contenido 90 grados hacia la izquierda
+            (sentido antihorario).
     """
+
+    portrait = PageObject.create_blank_page(
+        width=OUTPUT_W,
+        height=OUTPUT_H,
+    )
+
+    if direction == "right":
+
+        # Rotación de -90°:
+        #
+        # (x, y) -> (y, -x)
+        #
+        # Después de rotar, el contenido queda debajo del
+        # origen, por lo que lo movemos 792 puntos hacia arriba.
+        #
+        # Resultado:
+        #
+        # x: 0 .. 612
+        # y: 0 .. 792
+
+        transform = (
+            Transformation()
+            .rotate(-90)
+            .translate(
+                tx=0,
+                ty=OUTPUT_H,
+            )
+        )
+
+    elif direction == "left":
+
+        # Rotación de +90°:
+        #
+        # (x, y) -> (-y, x)
+        #
+        # Después de rotar queda a la izquierda del origen,
+        # así que lo desplazamos 612 puntos hacia la derecha.
+
+        transform = (
+            Transformation()
+            .rotate(90)
+            .translate(
+                tx=OUTPUT_W,
+                ty=0,
+            )
+        )
+
+    else:
+        raise ValueError(
+            "direction debe ser 'right' o 'left'"
+        )
+
+    portrait.merge_transformed_page(
+        landscape_page,
+        transform,
+    )
+
+    return portrait
+
+
+# ============================================================
+# IMPOSICIÓN DE CUADERNILLO
+# ============================================================
+
+def booklet_sheet_indices(
+    total_pages: int,
+    sheet_index: int,
+) -> dict[str, int]:
+    """
+    Devuelve los índices necesarios para una hoja de
+    cuadernillo clásica.
+
+    Ejemplo con 8 páginas:
+
+    Frente:
+        8 | 1
+
+    Reverso:
+        2 | 7
+    """
+
     return {
-        "front_left": total_pages - 1 - (2 * sheet_index),
-        "front_right": 2 * sheet_index,
-        "back_left": 2 * sheet_index + 1,
-        "back_right": total_pages - 2 - (2 * sheet_index),
+        "front_left":
+            total_pages - 1 - (2 * sheet_index),
+
+        "front_right":
+            2 * sheet_index,
+
+        "back_left":
+            2 * sheet_index + 1,
+
+        "back_right":
+            total_pages - 2 - (2 * sheet_index),
     }
 
 
-def build_booklet_2up(reader: PdfReader, margin: float = 12) -> PdfWriter:
+# ============================================================
+# CUADERNILLO 2-UP
+# ============================================================
+
+def build_booklet_2up(
+    reader: PdfReader,
+    margin: float = 12,
+    sideways: str = "right",
+) -> PdfWriter:
     """
-    Genera un PDF impuesto en formato cuadernillo.
-    Salida: hojas carta horizontal, 2 páginas por cara.
+    Genera un cuadernillo clásico.
+
+    Cada cara contiene 2 páginas del PDF original.
+
+    Internamente:
+        Carta horizontal 792 x 612
+
+    Salida real:
+        Carta vertical 612 x 792
+
+    El contenido queda girado 90 grados dentro de la página.
     """
+
     original_pages = list(reader.pages)
-    padded_pages = add_blank_pages(original_pages, multiple=4)
+
+    padded_pages = add_blank_pages(
+        original_pages,
+        multiple=4,
+    )
+
     total = len(padded_pages)
 
     writer = PdfWriter()
 
-    left_slot = (0, 0, SHEET_W / 2, SHEET_H)
-    right_slot = (SHEET_W / 2, 0, SHEET_W / 2, SHEET_H)
+    left_slot = (
+        0,
+        0,
+        SHEET_W / 2,
+        SHEET_H,
+    )
+
+    right_slot = (
+        SHEET_W / 2,
+        0,
+        SHEET_W / 2,
+        SHEET_H,
+    )
 
     num_sheets = total // 4
 
     for sheet in range(num_sheets):
-        idx = booklet_sheet_indices(total, sheet)
 
-        # Cara frontal
-        front = PageObject.create_blank_page(width=SHEET_W, height=SHEET_H)
-        merge_page_in_slot(front, padded_pages[idx["front_left"]], *left_slot, margin=margin)
-        merge_page_in_slot(front, padded_pages[idx["front_right"]], *right_slot, margin=margin)
-        writer.add_page(front)
+        idx = booklet_sheet_indices(
+            total,
+            sheet,
+        )
 
-        # Cara posterior
-        back = PageObject.create_blank_page(width=SHEET_W, height=SHEET_H)
-        merge_page_in_slot(back, padded_pages[idx["back_left"]], *left_slot, margin=margin)
-        merge_page_in_slot(back, padded_pages[idx["back_right"]], *right_slot, margin=margin)
-        writer.add_page(back)
+        # ----------------------------------------------------
+        # CARA FRONTAL
+        # ----------------------------------------------------
+
+        front = PageObject.create_blank_page(
+            width=SHEET_W,
+            height=SHEET_H,
+        )
+
+        merge_page_in_slot(
+            front,
+            padded_pages[idx["front_left"]],
+            *left_slot,
+            margin=margin,
+        )
+
+        merge_page_in_slot(
+            front,
+            padded_pages[idx["front_right"]],
+            *right_slot,
+            margin=margin,
+        )
+
+        # Convertimos la hoja horizontal a una página
+        # físicamente vertical.
+        front_portrait = make_portrait_sideways(
+            front,
+            direction=sideways,
+        )
+
+        writer.add_page(front_portrait)
+
+        # ----------------------------------------------------
+        # CARA POSTERIOR
+        # ----------------------------------------------------
+
+        back = PageObject.create_blank_page(
+            width=SHEET_W,
+            height=SHEET_H,
+        )
+
+        merge_page_in_slot(
+            back,
+            padded_pages[idx["back_left"]],
+            *left_slot,
+            margin=margin,
+        )
+
+        merge_page_in_slot(
+            back,
+            padded_pages[idx["back_right"]],
+            *right_slot,
+            margin=margin,
+        )
+
+        back_portrait = make_portrait_sideways(
+            back,
+            direction=sideways,
+        )
+
+        writer.add_page(back_portrait)
 
     return writer
 
 
-def build_booklet_4up(reader: PdfReader, margin: float = 12) -> PdfWriter:
+# ============================================================
+# CUADERNILLO 4-UP
+# ============================================================
+
+def build_booklet_4up(
+    reader: PdfReader,
+    margin: float = 12,
+    sideways: str = "right",
+) -> PdfWriter:
     """
-    Genera un cuadernillo 4-up para doblar solo una vez (sin cortes).
-    Cada cara de la hoja tiene 2 páginas arriba y 2 abajo.
-    Al doblar, cada página del libro muestra 2 páginas del PDF original.
+    Genera un cuadernillo 4-up.
+
+    Cada cara de la hoja contiene:
+
+        2 páginas arriba
+        2 páginas abajo
+
+    Por lo tanto:
+
+        4 páginas originales por cara
+        8 páginas originales por hoja física
+
+    El documento se arma primero en Carta horizontal y luego
+    todo el contenido se gira dentro de una página Carta
+    vertical.
+
+    Está diseñado para doblar la hoja una sola vez, sin cortes.
     """
+
     original_pages = list(reader.pages)
-    # Para este formato, el total de páginas debe ser múltiplo de 8 
-    # (ya que cada hoja física contiene 8 páginas del PDF)
-    padded_pages = add_blank_pages(original_pages, multiple=8)
+
+    # Cada hoja física contiene 8 páginas originales.
+    padded_pages = add_blank_pages(
+        original_pages,
+        multiple=8,
+    )
+
     total = len(padded_pages)
-    
+
     writer = PdfWriter()
 
-    # Definimos los cuadrantes (slots)
+    # --------------------------------------------------------
+    # Cuadrantes de la hoja lógica horizontal
+    # --------------------------------------------------------
+
     half_w = SHEET_W / 2
     half_h = SHEET_H / 2
 
-    # Slots: (x, y, ancho, alto)
-    slot_tl = (0,      half_h, half_w, half_h) # Superior Izquierda
-    slot_tr = (half_w, half_h, half_w, half_h) # Superior Derecha
-    slot_bl = (0,      0,      half_w, half_h) # Inferior Izquierda
-    slot_br = (half_w, 0,      half_w, half_h) # Inferior Derecha
+    # Coordenadas PDF:
+    # origen = esquina inferior izquierda
 
-    # Calculamos cuántas hojas físicas de papel usaremos
+    slot_tl = (
+        0,
+        half_h,
+        half_w,
+        half_h,
+    )
+
+    slot_tr = (
+        half_w,
+        half_h,
+        half_w,
+        half_h,
+    )
+
+    slot_bl = (
+        0,
+        0,
+        half_w,
+        half_h,
+    )
+
+    slot_br = (
+        half_w,
+        0,
+        half_w,
+        half_h,
+    )
+
+    # Una hoja física contiene 8 páginas del PDF original.
     num_sheets = total // 8
-    # Tratamos el documento como si fueran pares de páginas (total // 2)
+
+    # Tratamos cada par de páginas originales como si fuera
+    # una "página lógica" del cuadernillo clásico.
     num_pairs = total // 2
 
     for sheet in range(num_sheets):
-        # Usamos la lógica de 2-up pero aplicada a pares de páginas
-        # El par 0 contiene PDF pag 0 y 1. El par 1 contiene PDF pag 2 y 3...
-        p_idx = booklet_sheet_indices(num_pairs, sheet)
 
-        # --- CARA FRONTAL (Anverso) ---
-        front = PageObject.create_blank_page(width=SHEET_W, height=SHEET_H)
-        
-        # Par Izquierdo (Páginas del final del PDF)
-        merge_page_in_slot(front, padded_pages[2 * p_idx["front_left"]],     *slot_tl, margin=margin)
-        merge_page_in_slot(front, padded_pages[2 * p_idx["front_left"] + 1], *slot_bl, margin=margin)
-        
-        # Par Derecho (Páginas del inicio del PDF - Portada)
-        merge_page_in_slot(front, padded_pages[2 * p_idx["front_right"]],     *slot_tr, margin=margin)
-        merge_page_in_slot(front, padded_pages[2 * p_idx["front_right"] + 1], *slot_br, margin=margin)
-        
-        writer.add_page(front)
+        p_idx = booklet_sheet_indices(
+            num_pairs,
+            sheet,
+        )
 
-        # --- CARA POSTERIOR (Reverso) ---
-        back = PageObject.create_blank_page(width=SHEET_W, height=SHEET_H)
-        
-        # Par Izquierdo
-        merge_page_in_slot(back, padded_pages[2 * p_idx["back_left"]],     *slot_tl, margin=margin)
-        merge_page_in_slot(back, padded_pages[2 * p_idx["back_left"] + 1], *slot_bl, margin=margin)
-        
-        # Par Derecho
-        merge_page_in_slot(back, padded_pages[2 * p_idx["back_right"]],     *slot_tr, margin=margin)
-        merge_page_in_slot(back, padded_pages[2 * p_idx["back_right"] + 1], *slot_br, margin=margin)
-        
-        writer.add_page(back)
+        # ====================================================
+        # CARA FRONTAL
+        # ====================================================
+
+        front = PageObject.create_blank_page(
+            width=SHEET_W,
+            height=SHEET_H,
+        )
+
+        # ----------------------------------------------------
+        # PAR IZQUIERDO
+        # Páginas provenientes del final del documento
+        # ----------------------------------------------------
+
+        pair = p_idx["front_left"]
+
+        merge_page_in_slot(
+            front,
+            padded_pages[2 * pair],
+            *slot_tl,
+            margin=margin,
+        )
+
+        merge_page_in_slot(
+            front,
+            padded_pages[2 * pair + 1],
+            *slot_bl,
+            margin=margin,
+        )
+
+        # ----------------------------------------------------
+        # PAR DERECHO
+        # Páginas provenientes del inicio del documento
+        # ----------------------------------------------------
+
+        pair = p_idx["front_right"]
+
+        merge_page_in_slot(
+            front,
+            padded_pages[2 * pair],
+            *slot_tr,
+            margin=margin,
+        )
+
+        merge_page_in_slot(
+            front,
+            padded_pages[2 * pair + 1],
+            *slot_br,
+            margin=margin,
+        )
+
+        # Convertimos a Carta vertical
+        front_portrait = make_portrait_sideways(
+            front,
+            direction=sideways,
+        )
+
+        writer.add_page(front_portrait)
+
+        # ====================================================
+        # CARA POSTERIOR
+        # ====================================================
+
+        back = PageObject.create_blank_page(
+            width=SHEET_W,
+            height=SHEET_H,
+        )
+
+        # ----------------------------------------------------
+        # PAR IZQUIERDO
+        # ----------------------------------------------------
+
+        pair = p_idx["back_left"]
+
+        merge_page_in_slot(
+            back,
+            padded_pages[2 * pair],
+            *slot_tl,
+            margin=margin,
+        )
+
+        merge_page_in_slot(
+            back,
+            padded_pages[2 * pair + 1],
+            *slot_bl,
+            margin=margin,
+        )
+
+        # ----------------------------------------------------
+        # PAR DERECHO
+        # ----------------------------------------------------
+
+        pair = p_idx["back_right"]
+
+        merge_page_in_slot(
+            back,
+            padded_pages[2 * pair],
+            *slot_tr,
+            margin=margin,
+        )
+
+        merge_page_in_slot(
+            back,
+            padded_pages[2 * pair + 1],
+            *slot_br,
+            margin=margin,
+        )
+
+        # Convertimos a Carta vertical
+        back_portrait = make_portrait_sideways(
+            back,
+            direction=sideways,
+        )
+
+        writer.add_page(back_portrait)
 
     return writer
 
 
+# ============================================================
+# SELECCIÓN DEL MODO
+# ============================================================
 
-def build_booklet(reader: PdfReader, margin: float = 12, pages_per_side: int = 2) -> PdfWriter:
+def build_booklet(
+    reader: PdfReader,
+    margin: float = 12,
+    pages_per_side: int = 2,
+    sideways: str = "right",
+) -> PdfWriter:
+    """
+    Construye el cuadernillo según la cantidad de páginas
+    solicitadas por cara.
+    """
+
     if pages_per_side == 2:
-        return build_booklet_2up(reader, margin=margin)
-    if pages_per_side == 4:
-        return build_booklet_4up(reader, margin=margin)
-    raise ValueError("pages_per_side debe ser 2 o 4")
+        return build_booklet_2up(
+            reader,
+            margin=margin,
+            sideways=sideways,
+        )
 
+    if pages_per_side == 4:
+        return build_booklet_4up(
+            reader,
+            margin=margin,
+            sideways=sideways,
+        )
+
+    raise ValueError(
+        "pages_per_side debe ser 2 o 4"
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main() -> None:
+
     parser = argparse.ArgumentParser(
-        description="Convierte un PDF en cuadernillo carta, con 2 o 4 páginas por cara."
+        description=(
+            "Convierte un PDF en cuadernillo Carta con "
+            "2 o 4 páginas por cara. "
+            "La salida es Carta vertical con el contenido "
+            "girado 90 grados."
+        )
     )
-    parser.add_argument("input_pdf", help="Ruta del PDF de entrada, relativa a pdf/input/")
+
+    parser.add_argument(
+        "input_pdf",
+        help=(
+            "Ruta del PDF de entrada, relativa a pdf/input/"
+        ),
+    )
+
     parser.add_argument(
         "-o",
         "--output",
-        help="Ruta del PDF de salida. Si no se indica, crea un archivo en pdf/output/",
+        help=(
+            "Ruta del PDF de salida. "
+            "Si no se indica, se crea en pdf/output/"
+        ),
     )
+
     parser.add_argument(
         "--margin",
         type=float,
         default=12,
-        help="Margen interno en puntos PDF. Default: 12",
+        help=(
+            "Margen interno en puntos PDF. "
+            "Default: 12"
+        ),
     )
+
     parser.add_argument(
         "--p",
         type=int,
         choices=[2, 4],
         default=4,
-        help="Cantidad de páginas por cara: 2 o 4. Default: 4",
+        help=(
+            "Cantidad de páginas originales por cara: "
+            "2 o 4. Default: 4"
+        ),
+    )
+
+    parser.add_argument(
+        "--sideways",
+        choices=["right", "left"],
+        default="right",
+        help=(
+            "Dirección en que se gira el contenido "
+            "dentro de la hoja vertical. "
+            "'right' = horario, "
+            "'left' = antihorario. "
+            "Default: right"
+        ),
     )
 
     args = parser.parse_args()
 
+    # --------------------------------------------------------
+    # Entrada
+    # --------------------------------------------------------
+
     input_path = Path("pdf/input") / args.input_pdf
+
     if not input_path.exists():
-        raise FileNotFoundError(f"No existe el archivo: {input_path}")
+        raise FileNotFoundError(
+            f"No existe el archivo: {input_path}"
+        )
+
+    # --------------------------------------------------------
+    # Salida
+    # --------------------------------------------------------
 
     output_dir = Path("pdf/output")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     if args.output:
+
         output_path = Path(args.output)
+
     else:
-        suffix = f"_cuadernillo_{args.p}up.pdf"
-        output_path = output_dir / f"{input_path.stem}{suffix}"
+
+        suffix = (
+            f"_cuadernillo_{args.p}up_vertical.pdf"
+        )
+
+        output_path = (
+            output_dir
+            / f"{input_path.stem}{suffix}"
+        )
 
     if output_path.parent != Path("."):
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
-    reader = PdfReader(str(input_path))
+    # --------------------------------------------------------
+    # Leer PDF
+    # --------------------------------------------------------
+
+    reader = PdfReader(
+        str(input_path)
+    )
+
+    # --------------------------------------------------------
+    # Construir cuadernillo
+    # --------------------------------------------------------
+
     writer = build_booklet(
         reader,
         margin=args.margin,
         pages_per_side=args.p,
+        sideways=args.sideways,
     )
+
+    # --------------------------------------------------------
+    # Guardar
+    # --------------------------------------------------------
 
     with output_path.open("wb") as f:
         writer.write(f)
 
-    total_original = len(reader.pages)
-    multiple = 4 if args.p == 2 else 8
-    total_padded = math.ceil(total_original / multiple) * multiple
-    blanks_added = total_padded - total_original
+    # --------------------------------------------------------
+    # Estadísticas
+    # --------------------------------------------------------
 
-    print(f"PDF original: {input_path}")
-    print(f"Páginas originales: {total_original}")
-    print(f"Páginas finales ajustadas: {total_padded}")
-    print(f"Páginas en blanco agregadas: {blanks_added}")
-    print(f"Páginas por cara: {args.p}")
-    print(f"Salida: {output_path}")
+    total_original = len(reader.pages)
+
+    multiple = (
+        4
+        if args.p == 2
+        else 8
+    )
+
+    total_padded = (
+        math.ceil(total_original / multiple)
+        * multiple
+    )
+
+    blanks_added = (
+        total_padded - total_original
+    )
+
+    # --------------------------------------------------------
+    # Resultado
+    # --------------------------------------------------------
+
     print()
-    print("Imprimir así:")
-    print("- Tamaño carta")
-    print("- Doble cara")
-    print("- Voltear por borde corto")
-    print("- Escala 100% o tamaño real")
+    print("==========================================")
+    print(" CUADERNILLO GENERADO")
+    print("==========================================")
+    print()
+
+    print(f"PDF original:")
+    print(f"  {input_path}")
+
+    print()
+
+    print(
+        f"Páginas originales: "
+        f"{total_original}"
+    )
+
+    print(
+        f"Páginas finales ajustadas: "
+        f"{total_padded}"
+    )
+
+    print(
+        f"Páginas en blanco agregadas: "
+        f"{blanks_added}"
+    )
+
+    print(
+        f"Páginas por cara: "
+        f"{args.p}"
+    )
+
+    print(
+        f"Giro del contenido: "
+        f"{args.sideways}"
+    )
+
+    print()
+
+    print("PDF de salida:")
+    print(f"  {output_path}")
+
+    print()
+
+    print("Tamaño físico de cada página PDF:")
+    print(
+        f"  {OUTPUT_W} x {OUTPUT_H} puntos"
+    )
+    print("  Carta / Letter VERTICAL")
+
+    print()
+
+    print("==========================================")
+    print(" CONFIGURACIÓN DE IMPRESIÓN")
+    print("==========================================")
+    print()
+
+    print("- Papel: Carta / Letter")
+    print("- Orientación: VERTICAL / Portrait")
+    print("- Páginas por hoja: 1")
+    print("- Escala: 100% / Tamaño real")
+    print("- NO usar 'ajustar orientación'")
+    print("- NO usar 'rotar automáticamente'")
+    print("- NO seleccionar Landscape")
+    print()
+    print(
+        "El contenido ya está girado físicamente "
+        "90 grados dentro del PDF."
+    )
+    print()
 
 
 if __name__ == "__main__":
